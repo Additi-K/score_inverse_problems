@@ -579,6 +579,10 @@ def get_cs_solver(config, sde, model, shape, inverse_scaler, eps=1e-5):
 
   return sampling_fn
 
+########################################
+# added score-MRI pc sampler for complex reconstruction
+# to be converted to jax
+#########################################
 
 def get_pc_fouriercs_RI(sde, predictor, corrector, inverse_scaler, snr,
                         n_steps=1, probability_flow=False, continuous=False,
