@@ -517,3 +517,67 @@ def get_ode_sampler(sde, model, shape, inverse_scaler,
     return x, nfe
 
   return ode_sampler
+
+########################################
+# added score-MRI pc sampler for complex reconstruction
+# to be converted to jax
+#########################################
+
+
+def get_pc_fouriercs_RI(sde, predictor, corrector, inverse_scaler, snr,
+                        n_steps=1, probability_flow=False, continuous=False,
+                        denoise=True, eps=1e-5):
+  # Define predictor & corrector
+  predictor_update_fn = functools.partial(shared_predictor_update_fn,
+                                          sde=sde,
+                                          predictor=predictor,
+                                          probability_flow=probability_flow,
+                                          continuous=continuous)
+  corrector_update_fn = functools.partial(shared_corrector_update_fn,
+                                          sde=sde,
+                                          corrector=corrector,
+                                          continuous=continuous,
+                                          snr=snr,
+                                          n_steps=n_steps)
+
+  def data_fidelity(mask, x, x_mean, Fy):
+      x = ifft2(fft2(x) * (1. - mask) + Fy)
+      x_mean = ifft2(fft2(x_mean) * (1. - mask) + Fy)
+      return x, x_mean
+
+  def get_fouriercs_update_fn(update_fn):
+    def fouriercs_update_fn(model, data, mask, x, t, Fy=None):
+      with torch.no_grad():
+        vec_t = torch.ones(data.shape[0], device=data.device) * t
+        # split real / imag part
+        x_real = torch.real(x)
+        x_imag = torch.imag(x)
+
+        # perform update step with real / imag part seperately
+        x_real, x_real_mean = update_fn(x_real, vec_t, model=model)
+        x_imag, x_imag_mean = update_fn(x_imag, vec_t, model=model)
+
+        # merge real / imag values to form complex image
+        x = x_real + 1j * x_imag
+        x_mean = x_real_mean + 1j * x_imag_mean
+        x, x_mean = data_fidelity(mask, x, x_mean, Fy)
+        return x, x_mean
+
+    return fouriercs_update_fn
+
+  projector_fouriercs_update_fn = get_fouriercs_update_fn(predictor_update_fn)
+  corrector_fouriercs_update_fn = get_fouriercs_update_fn(corrector_update_fn)
+
+  def pc_fouriercs(model, data, mask, Fy=None):
+    with torch.no_grad():
+      # Initial sample (complex-valued)
+      x = ifft2(Fy + fft2(sde.prior_sampling(data.shape).to(data.device)) * (1. - mask))
+      timesteps = torch.linspace(sde.T, eps, sde.N)
+      for i in tqdm(range(sde.N)):
+        t = timesteps[i]
+        x, x_mean = corrector_fouriercs_update_fn(model, data, mask, x, t, Fy=Fy)
+        x, x_mean = projector_fouriercs_update_fn(model, data, mask, x, t, Fy=Fy)
+
+      return inverse_scaler(x_mean if denoise else x)
+
+  return pc_fouriercs
